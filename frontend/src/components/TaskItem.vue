@@ -10,6 +10,22 @@
     @keydown.enter="$emit('select')"
     @contextmenu="$emit('contextmenu', $event)"
   >
+    <button
+      class="task-drag-handle"
+      type="button"
+      title="拖动排序"
+      aria-label="拖动排序"
+      @click.stop
+    >
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+        <circle cx="4" cy="3" r="1.1" />
+        <circle cx="10" cy="3" r="1.1" />
+        <circle cx="4" cy="7" r="1.1" />
+        <circle cx="10" cy="7" r="1.1" />
+        <circle cx="4" cy="11" r="1.1" />
+        <circle cx="10" cy="11" r="1.1" />
+      </svg>
+    </button>
     <div class="task-checkbox" :class="{ done: task.done }" @click.stop="$emit('toggle')" role="checkbox" :aria-checked="task.done">
       <svg v-if="task.done" class="check-icon" width="9" height="9" viewBox="0 0 9 9" fill="none">
         <path d="M1.5 4.5L3.5 6.5L7.5 2.5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
@@ -101,6 +117,36 @@ function cancelEdit() {
 
 .task-item.task-new {
   animation: taskIn 0.2s ease-out;
+}
+
+.task-drag-handle {
+  width: 16px;
+  height: 18px;
+  margin: -1px -2px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: grab;
+  opacity: 0.48;
+  transition: opacity var(--transition), background var(--transition), color var(--transition);
+}
+.task-drag-handle svg {
+  display: block;
+  fill: currentColor;
+}
+.task-drag-handle:hover,
+.task-drag-handle:focus-visible {
+  opacity: 0.9;
+  background: oklch(100% 0 0 / 0.72);
+  outline: none;
+}
+.task-drag-handle:active {
+  cursor: grabbing;
 }
 
 /* Quadrant-specific hover */
@@ -225,6 +271,10 @@ function cancelEdit() {
 /* Compact mode (list views) */
 .task-item.compact {
   padding: 3px 6px;
+}
+.task-item.compact .task-drag-handle {
+  height: 16px;
+  margin-top: -1px;
 }
 .task-item.compact .task-title {
   font-size: 13px;

@@ -158,9 +158,15 @@ onMounted(() => {
       put: true,
     },
     ghostClass: 'task-ghost',
+    chosenClass: 'task-chosen',
+    dragClass: 'task-dragging',
     draggable: '.task-item',   // only TaskItem elements are sortable
+    handle: '.task-drag-handle',
     filter: '.empty-state, .inline-add',  // ignore empty state and inline add
     preventOnFilter: true,     // prevent default on filtered elements
+    forceFallback: true,
+    fallbackOnBody: true,
+    fallbackTolerance: 4,
     emptyInsertThreshold: 30,
     // ─── SortableJS callbacks are SYNCHRONOUS ───
     // This is the key advantage over vuedraggable:
@@ -185,21 +191,32 @@ function handleSortEnd(evt: Sortable.SortableEvent) {
   const toQ = getQuadrantFromContainer(evt.to)
   const oldIdx = evt.oldIndex ?? 0
   const newIdx = evt.newIndex ?? 0
+  const clientId = evt.item.getAttribute('data-client-id')
 
   if (fromQ === toQ) {
     // ─── Same quadrant reorder ───
-    if (oldIdx === newIdx) {
+    const newOrder = orderedTasksFromContainer(evt.to)
+    const hasDomOrder = newOrder.length === localList.value.length
+    const previousIds = localList.value.map(t => t.clientId).join('|')
+    const nextIds = newOrder.map(t => t.clientId).join('|')
+
+    if ((hasDomOrder && previousIds === nextIds) || (!hasDomOrder && oldIdx === newIdx)) {
       isDragging = false
       return
     }
 
-    // Manually reorder localList to match SortableJS's DOM order
-    const newOrder = [...localList.value]
-    const [moved] = newOrder.splice(oldIdx, 1)
-    newOrder.splice(newIdx, 0, moved)
-    localList.value = newOrder
+    if (!hasDomOrder) {
+      const fallbackOrder = [...localList.value]
+      const [moved] = fallbackOrder.splice(oldIdx, 1)
+      fallbackOrder.splice(newIdx, 0, moved)
+      localList.value = fallbackOrder
+      void persistReorder(fallbackOrder)
+      isDragging = false
+      return
+    }
 
-    // Persist new sortOrders
+    // Persist the actual DOM order the user sees after dropping.
+    localList.value = newOrder
     void persistReorder(newOrder)
 
     // Release drag lock
@@ -208,6 +225,9 @@ function handleSortEnd(evt: Sortable.SortableEvent) {
     // but since localList already has the correct order, the sync is harmless
   } else {
     // ─── Cross-quadrant move ───
+    const destinationIds = clientId ? orderedClientIdsFromContainer(evt.to) : []
+    const destinationIndex = clientId ? destinationIds.indexOf(clientId) : -1
+
     // SortableJS has physically moved the DOM element to the destination container.
     // We MUST undo this move before Vue re-renders to avoid DOM reconciliation conflicts.
     // Undo: move the element back to its original position in the source container.
@@ -219,14 +239,31 @@ function handleSortEnd(evt: Sortable.SortableEvent) {
       evt.from.appendChild(evt.item)
     }
 
-    // Identify the moved task from data-client-id attribute on the TaskItem root element
-    const clientId = evt.item.getAttribute('data-client-id')
-    if (clientId) void persistCrossQuadrantMove(clientId, fromQ, toQ, newIdx)
+    if (clientId) {
+      void persistCrossQuadrantMove(clientId, fromQ, toQ, destinationIndex >= 0 ? destinationIndex : newIdx)
+    }
 
     // Release drag lock — watch will sync localList for both source and destination
     isDragging = false
     syncLocalList()
   }
+}
+
+function orderedClientIdsFromContainer(container: HTMLElement): string[] {
+  return [...container.querySelectorAll<HTMLElement>('.task-item')]
+    .map(el => el.dataset.clientId)
+    .filter((id): id is string => Boolean(id))
+}
+
+function orderedTasksFromContainer(container: HTMLElement): Task[] {
+  const taskById = new Map<string, Task>()
+  for (const task of [...localList.value, ...visibleTasks.value, ...store.tasks]) {
+    taskById.set(task.clientId, task)
+  }
+
+  return orderedClientIdsFromContainer(container)
+    .map(id => taskById.get(id))
+    .filter((task): task is Task => Boolean(task))
 }
 
 async function persistReorder(order: Task[]) {
