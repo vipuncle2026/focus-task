@@ -1,12 +1,9 @@
 <template>
   <div
     class="quadrant"
-    :class="['q' + quadrant, { 'drag-over': isDragOver }, { 'q-dimmed': isDimmed }, { 'celebrate': celebrating }]"
+    :class="['q' + quadrant, { 'q-dimmed': isDimmed }, { 'celebrate': celebrating }]"
     role="region"
     :aria-label="title"
-    @dragover="onDragOver"
-    @dragleave="onDragLeave"
-    @drop="onDrop"
   >
     <div class="quadrant-header">
       <div class="quadrant-dot"></div>
@@ -14,29 +11,19 @@
       <span class="quadrant-count">{{ undoneCount }}</span>
       <button class="quadrant-add" @click="showInlineAdd" title="添加任务">+</button>
     </div>
-    <div class="task-list">
-      <draggable
-        :list="draggableList"
-        :group="{ name: 'tasks', pull: true, put: true }"
-        item-key="clientId"
-        :animation="180"
-        :empty-insert-threshold="30"
-        ghost-class="task-ghost"
-        @change="onDragChange"
-      >
-        <template #item="{ element: task }">
-          <TaskItem
-            :task="task"
-            :quadrant="quadrant"
-            :selected="task.clientId === store.selectedTaskId"
-            compact
-            @select="store.selectTask(task.clientId)"
-            @toggle="store.toggleDone(task.clientId)"
-            @contextmenu="onItemContext($event, task.clientId)"
-            @dblclick-title="onDblClickTitle(task.clientId, task.title)"
-          />
-        </template>
-      </draggable>
+    <div ref="sortableEl" class="task-list">
+      <TaskItem
+        v-for="task in localList"
+        :key="task.clientId"
+        :task="task"
+        :quadrant="quadrant"
+        :selected="task.clientId === store.selectedTaskId"
+        compact
+        @select="store.selectTask(task.clientId)"
+        @toggle="store.toggleDone(task.clientId)"
+        @contextmenu="onItemContext($event, task.clientId)"
+        @dblclick-title="onDblClickTitle"
+      />
       <div v-if="visibleTasks.length === 0" class="empty-state visible">
         <div class="empty-state-icon">
           <!-- Q1: target -->
@@ -79,10 +66,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, inject, watch } from 'vue'
-import { useTaskStore } from '@/stores/taskStore'
+import { ref, computed, nextTick, inject, watch, onMounted, onBeforeUnmount } from 'vue'
+import { useTaskStore, type Task } from '@/stores/taskStore'
 import { useTaskFilter } from '@/composables/useTaskFilter'
-import draggable from 'vuedraggable'
+import Sortable from 'sortablejs'
 import TaskItem from './TaskItem.vue'
 import * as api from '@/api'
 
@@ -94,7 +81,6 @@ const showContextMenu: any = inject('showContextMenu', () => {})
 const addVisible = ref(false)
 const addTitle = ref('')
 const addInputEl = ref<HTMLInputElement | null>(null)
-const isDragOver = ref(false)
 const celebrating = ref(false)
 
 const titles: Record<number, string> = {
@@ -115,12 +101,20 @@ const emptyText = computed(() => emptyTexts[props.quadrant])
 
 const visibleTasks = computed(() => filterForQuadrant(store.quadrantTasks(props.quadrant)))
 
-// ─── Draggable list: mutable copy for vuedraggable ───
-// vuedraggable requires a mutable array ref. We sync back to store on changes.
-const draggableList = computed({
-  get: () => visibleTasks.value,
-  set: () => {} // vuedraggable mutates in-place; we handle reorder via onDragChange
-})
+// ─── Local list for rendering ───
+// localList is a mutable ref synced from visibleTasks.
+// SortableJS modifies DOM directly; we update localList manually on drag end.
+// isDragging flag (set synchronously by SortableJS onStart) prevents watch sync during drag.
+const localList = ref<Task[]>([])
+let isDragging = false
+
+function syncLocalList() {
+  if (!isDragging) {
+    localList.value = [...visibleTasks.value]
+  }
+}
+
+watch(visibleTasks, syncLocalList, { immediate: true })
 
 const undoneCount = computed(() => visibleTasks.value.filter(t => !t.done).length)
 
@@ -133,16 +127,136 @@ const isDimmed = computed(() => {
 watch(undoneCount, (newVal, oldVal) => {
   if (oldVal > 0 && newVal === 0 && visibleTasks.value.length > 0) {
     celebrating.value = true
-    setTimeout(() => { celebrating.value = false }, 1500)
+    setTimeout(() => { celebrating.value = false }, 2000)
   }
 })
+
+// ─── SortableJS (direct, no vuedraggable wrapper) ───
+const sortableEl = ref<HTMLElement | null>(null)
+let sortableInstance: Sortable | null = null
+
+function getQuadrantFromContainer(el: HTMLElement): number {
+  // Each .task-list is inside a .quadrant.qX element
+  // We also store data-qid on each TaskItem for identification
+  const qEl = el.closest('.quadrant')
+  if (!qEl) return props.quadrant
+  for (const cls of qEl.classList) {
+    if (cls.startsWith('q') && cls.length <= 2) {
+      const n = parseInt(cls.substring(1))
+      if (n >= 1 && n <= 4) return n
+    }
+  }
+  return props.quadrant
+}
+
+onMounted(() => {
+  if (!sortableEl.value) return
+  sortableInstance = Sortable.create(sortableEl.value, {
+    animation: 180,
+    group: {
+      name: 'tasks',
+      pull: true,
+      put: true,
+    },
+    ghostClass: 'task-ghost',
+    draggable: '.task-item',   // only TaskItem elements are sortable
+    filter: '.empty-state, .inline-add',  // ignore empty state and inline add
+    preventOnFilter: true,     // prevent default on filtered elements
+    emptyInsertThreshold: 30,
+    // ─── SortableJS callbacks are SYNCHRONOUS ───
+    // This is the key advantage over vuedraggable:
+    // onStart fires immediately, so isDragging=true is set before any Vue re-render
+    onStart: () => {
+      isDragging = true
+    },
+    onEnd: (evt: Sortable.SortableEvent) => {
+      // SortableJS always provides oldIndex/newIndex for same-container moves
+      // Cross-container moves also provide them, but we guard against undefined
+      handleSortEnd(evt)
+    },
+  })
+})
+
+onBeforeUnmount(() => {
+  sortableInstance?.destroy()
+})
+
+function handleSortEnd(evt: Sortable.SortableEvent) {
+  const fromQ = getQuadrantFromContainer(evt.from)
+  const toQ = getQuadrantFromContainer(evt.to)
+  const oldIdx = evt.oldIndex ?? 0
+  const newIdx = evt.newIndex ?? 0
+
+  if (fromQ === toQ) {
+    // ─── Same quadrant reorder ───
+    if (oldIdx === newIdx) {
+      isDragging = false
+      return
+    }
+
+    // Manually reorder localList to match SortableJS's DOM order
+    const newOrder = [...localList.value]
+    const [moved] = newOrder.splice(oldIdx, 1)
+    newOrder.splice(newIdx, 0, moved)
+    localList.value = newOrder
+
+    // Persist new sortOrders
+    persistReorder(newOrder)
+
+    // Release drag lock
+    isDragging = false
+    // visibleTasks will recompute (sortOrders changed), watch will sync —
+    // but since localList already has the correct order, the sync is harmless
+  } else {
+    // ─── Cross-quadrant move ───
+    // SortableJS has physically moved the DOM element to the destination container.
+    // We MUST undo this move before Vue re-renders to avoid DOM reconciliation conflicts.
+    // Undo: move the element back to its original position in the source container.
+    const fromChildren = [...evt.from.children]
+    const refNode = fromChildren[oldIdx] || null
+    if (refNode) {
+      evt.from.insertBefore(evt.item, refNode)
+    } else {
+      evt.from.appendChild(evt.item)
+    }
+
+    // Identify the moved task from data-client-id attribute on the TaskItem root element
+    const clientId = evt.item.getAttribute('data-client-id')
+    if (clientId) {
+      // Update quadrant in store — Vue will re-render both quadrants
+      store.updateTask(clientId, { quadrant: toQ })
+    }
+
+    // Release drag lock — watch will sync localList for both source and destination
+    isDragging = false
+    syncLocalList()
+  }
+}
+
+function persistReorder(order: Task[]) {
+  const items = order.map((t, i) => ({
+    clientId: t.clientId,
+    sortOrder: i
+  }))
+  // Update locally in store
+  for (const item of items) {
+    const task = store.tasks.find(t => t.clientId === item.clientId)
+    if (task) task.sortOrder = item.sortOrder
+  }
+  store.saveLocal()
+  // Persist to server
+  try {
+    api.reorderTasks(items)
+  } catch {
+    // Offline — will sync later
+  }
+}
 
 // ─── Inline Add ───
 let draftId: string | null = null
 
 async function showInlineAdd() {
   addVisible.value = true
-  // Create draft task
   const task = await store.addTask(props.quadrant, '')
   draftId = task.clientId
   store.selectTask(task.clientId)
@@ -155,7 +269,6 @@ function onAddInput() {
   const task = store.tasks.find(t => t.clientId === draftId)
   if (task) {
     task.title = addTitle.value
-    // The detail panel will pick up the change reactively
   }
 }
 
@@ -187,59 +300,9 @@ async function cancelAdd() {
   }, 150)
 }
 
-// ─── Drag reorder (vuedraggable) ───
-function onDragChange(evt: any) {
-  // vuedraggable emits 'added' (cross-quadrant move) and 'moved' (same-quadrant reorder)
-  if (evt.added) {
-    // Cross-quadrant: update the task's quadrant
-    const task = evt.added.element
-    store.updateTask(task.clientId, { quadrant: props.quadrant })
-  }
-  if (evt.moved) {
-    // Same-quadrant reorder: update sort orders for all tasks in this quadrant
-    persistReorder()
-  }
-}
-
-async function persistReorder() {
-  // Reassign sortOrder based on current position in draggableList
-  const items = visibleTasks.value.map((t, i) => ({
-    clientId: t.clientId,
-    sortOrder: i
-  }))
-  // Update locally
-  for (const item of items) {
-    const task = store.tasks.find(t => t.clientId === item.clientId)
-    if (task) task.sortOrder = item.sortOrder
-  }
-  store.saveLocal()
-  // Persist to server
-  try {
-    await api.reorderTasks(items)
-  } catch {
-    // Offline — will sync later
-  }
-}
-
 // ─── Inline Edit (double-click title) ───
 function onDblClickTitle(clientId: string, newTitle: string) {
   store.updateTask(clientId, { title: newTitle })
-}
-
-// ─── Legacy HTML5 drag events for visual feedback (drag-over outline) ───
-// vuedraggable handles the actual drag logic; these just provide visual hover feedback
-function onDragOver(e: DragEvent) {
-  e.preventDefault()
-  isDragOver.value = true
-}
-
-function onDragLeave() {
-  isDragOver.value = false
-}
-
-async function onDrop(e: DragEvent) {
-  e.preventDefault()
-  isDragOver.value = false
 }
 
 // ─── Context Menu ───
@@ -254,7 +317,7 @@ function onItemContext(e: MouseEvent, clientId: string) {
   border: 1px solid;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: clip;
   min-height: 0;
   flex: 1;
   transition: box-shadow var(--transition), opacity var(--transition), filter var(--transition), transform var(--transition);
@@ -264,33 +327,37 @@ function onItemContext(e: MouseEvent, clientId: string) {
 
 /* ─── Celebration animation ─── */
 .quadrant.celebrate {
-  animation: celebrateGlow 1.5s ease-out;
+  animation: celebrateGlow 2s ease-out, celebrateBg 2s ease-out;
 }
 @keyframes celebrateGlow {
-  0%   { box-shadow: 0 0 0 0 oklch(62% 0.16 145 / 0.5); }
-  15%  { box-shadow: 0 0 20px 6px oklch(62% 0.16 145 / 0.4); }
-  30%  { box-shadow: 0 0 14px 4px oklch(62% 0.16 145 / 0.25); }
-  50%  { box-shadow: 0 0 8px 2px oklch(62% 0.16 145 / 0.12); }
+  0%   { box-shadow: 0 0 0 0 oklch(62% 0.16 145 / 0.6); }
+  8%   { box-shadow: 0 0 32px 8px oklch(62% 0.16 145 / 0.45); }
+  20%  { box-shadow: 0 0 24px 6px oklch(62% 0.16 145 / 0.3); }
+  40%  { box-shadow: 0 0 12px 4px oklch(62% 0.16 145 / 0.15); }
+  70%  { box-shadow: 0 0 4px 1px oklch(62% 0.16 145 / 0.06); }
   100% { box-shadow: var(--shadow-card); }
 }
+@keyframes celebrateBg {
+  0%   { background-color: oklch(62% 0.16 145 / 0.08); }
+  15%  { background-color: oklch(62% 0.16 145 / 0.12); }
+  40%  { background-color: oklch(62% 0.16 145 / 0.05); }
+  100% { background-color: revert; }
+}
 .quadrant.celebrate .quadrant-title {
-  animation: celebrateText 1.5s ease-out;
+  animation: celebrateText 2s ease-out;
 }
 @keyframes celebrateText {
   0%   { transform: scale(1); }
-  15%  { transform: scale(1.08); }
-  30%  { transform: scale(1); }
+  8%   { transform: scale(1.12); }
+  20%  { transform: scale(1); }
+  30%  { transform: scale(1.04); }
+  45%  { transform: scale(1); }
 }
 
 .q1 { background: var(--q1-bg); border-color: var(--q1-border); }
 .q2 { background: var(--q2-bg); border-color: var(--q2-border); }
 .q3 { background: var(--q3-bg); border-color: var(--q3-border); }
 .q4 { background: var(--q4-bg); border-color: var(--q4-border); }
-
-.drag-over { outline: 2px solid var(--q1-header); outline-offset: -2px; }
-.q2.drag-over { outline-color: var(--q2-header); }
-.q3.drag-over { outline-color: var(--q3-header); }
-.q4.drag-over { outline-color: var(--q4-header); }
 
 .quadrant-header {
   display: flex; align-items: center;
@@ -371,8 +438,10 @@ function onItemContext(e: MouseEvent, clientId: string) {
   flex: 1; display: flex; align-items: center; justify-content: center;
   flex-direction: column; gap: 6px; padding: 18px;
   opacity: 0; transition: opacity 0.3s;
+  /* Important: empty-state must NOT be a sortable item */
+  pointer-events: none;
 }
-.empty-state.visible { opacity: 1; }
+.empty-state.visible { opacity: 1; pointer-events: auto; }
 .empty-state-icon { font-size: 22px; margin-bottom: 2px; }
 .empty-state p {
   font-size: 13px;
@@ -401,10 +470,16 @@ function onItemContext(e: MouseEvent, clientId: string) {
 }
 .inline-add-input::placeholder { color: var(--text-muted); }
 
-/* ─── Draggable ghost ─── */
+/* ─── SortableJS ghost ─── */
 .task-ghost {
   opacity: 0.35;
   background: oklch(95% 0.02 240);
   border-radius: var(--radius-sm);
+}
+
+/* ─── SortableJS chosen (being dragged) ─── */
+.task-item.sortable-chosen {
+  opacity: 0.8;
+  box-shadow: 0 4px 12px oklch(0% 0 0 / 0.12);
 }
 </style>

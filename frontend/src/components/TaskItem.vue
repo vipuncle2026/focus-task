@@ -2,6 +2,7 @@
   <div
     class="task-item"
     :class="{ done: task.done, selected, compact, pending: task.syncStatus === 'pending', conflict: task.syncStatus === 'conflict' }"
+    :data-client-id="task.clientId"
     tabindex="0"
     role="button"
     :aria-label="task.title || '未命名任务'"
