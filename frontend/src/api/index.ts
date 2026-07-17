@@ -24,6 +24,19 @@ const API_BASE = import.meta.env.VITE_API_BASE || `http://${dynamicHost}:8765`
 const LOCAL_BACKEND = /^http:\/\/(127\.0\.0\.1|localhost):8765$/.test(API_BASE)
 const STARTUP_RETRY_DELAYS = [150, 250, 400, 650, 1000, 1500]
 
+export function buildApiUrl(base: string, path: string): string {
+  const normalizedBase = base.replace(/\/+$/, '')
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+
+  // Docker's web image uses /api as its proxy base while endpoint paths also
+  // start with /api. Avoid producing routes such as /api/api/auth/login.
+  if (normalizedBase.endsWith('/api') && (normalizedPath === '/api' || normalizedPath.startsWith('/api/'))) {
+    return `${normalizedBase}${normalizedPath.slice(4)}`
+  }
+
+  return `${normalizedBase}${normalizedPath}`
+}
+
 // ─── Case conversion ───
 function toSnake(obj: any): any {
   if (Array.isArray(obj)) return obj.map(toSnake)
@@ -153,7 +166,7 @@ async function request(method: string, path: string, body?: any): Promise<any> {
 
   let res: Response
   try {
-    res = await fetchWithStartupRetry(`${API_BASE}${path}`, {
+    res = await fetchWithStartupRetry(buildApiUrl(API_BASE, path), {
       method,
       headers,
       body: body ? JSON.stringify(toSnake(body)) : undefined,
